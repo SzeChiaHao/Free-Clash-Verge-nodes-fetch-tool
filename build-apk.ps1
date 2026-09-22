@@ -90,7 +90,7 @@ if (-not $Release) {
 
 # ==================== 发布到 GitHub Releases + 更新 version.json ====================
 
-$Repo     = 'SzeChiaHao/NodeKeeper'
+$Repo     = 'SzeChiaHao/FreeNodesDaily'
 $Tag      = "v$newName"
 $Vc       = $newCode
 $AssetName = "Walls-$newName-vc$Vc.apk"
