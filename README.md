@@ -49,11 +49,20 @@ powershell -ExecutionPolicy Bypass -File tools\daily_auto.ps1
   Shadowsocks（AEAD / 流式）、Trojan（tcp / ws + TLS）、VLESS（tcp / ws + TLS）。
   做法是拿一批「mihomo 能跑通」的节点当标准答案，做端到端比对，详见 **[android/README.md](android/README.md)**。
 
-构建：
+构建（Windows 一键）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1              # 版本 +1 并编译
+powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1 -NoBump      # 只重编，不动版本号
+powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1 -Version 2.0 # 指定版本名
+```
+
+脚本会自动把 `versionCode` 加一（覆盖安装要求新包的 versionCode 更大），编译完把成品复制成 `%USERPROFILE%\Downloads\Walls-<版本>.apk`，直接传手机装即可。
+
+手动构建：
 
 ```bash
 cd android
-# 若仓库里没有 gradlew，可用本机 gradle 8.9 生成：gradle wrapper
 ./gradlew assembleRelease          # Windows: gradlew.bat assembleRelease
 ```
 
