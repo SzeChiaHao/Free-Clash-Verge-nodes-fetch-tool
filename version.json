@@ -1,0 +1,9 @@
+﻿{
+    "versionName":  "1.3",
+    "versionCode":  4,
+    "apk":  "https://github.com/SzeChiaHao/Free-Clash-Verge-nodes-fetch-tool/releases/download/v1.3/Walls-1.3-vc4.apk",
+    "size":  4795942,
+    "sha256":  "12d4e21be4e61a71b0690bc865eff99057e5bb30b62378d2b27c8ecd18e4abbb",
+    "notes":  "首个发布版本。\n\n· 免费节点抓取 + 真实隧道测速 + 按速度排序 + 本地订阅服务\n· 真实测速支持 Shadowsocks / Trojan / VLESS（tcp、ws + TLS）——不再只有 ss\n· App 内自动更新：以后打开就会提示新版本，一键下载安装",
+    "publishedAt":  "2026-09-22 20:08"
+}
