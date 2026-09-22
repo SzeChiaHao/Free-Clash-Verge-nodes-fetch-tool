@@ -1,6 +1,7 @@
-# Free Clash Verge Nodes Fetch Tool · 免费节点抓取测速管家
+# NodeKeeper · 免费节点抓取测速管家
 
-抓取公开免费节点 → 实测延迟与下载速度 → 排序过滤 → 生成 Clash / Clash Verge 订阅。
+抓取公开免费节点 → 实测延迟与下载速度 → 排序过滤 → 导出**各种客户端**的订阅：
+Clash / Clash Verge / mihomo、sing-box、v2rayN / v2rayNG、Shadowrocket、Shadowsocks（sip008 / ss 链接）。
 同一套逻辑有两个前端：Windows 上的 Python 命令行流水线，以及 Android 手机上的「节点管家」App。
 
 > 免费节点随时失效、质量参差，且有安全风险（可能记录流量）。请勿通过免费节点登录重要账号、
@@ -11,17 +12,17 @@
 ## 一、目录结构
 
 ```
-tools/      Windows 端：Python 抓取 + mihomo 内核测速 + 生成订阅 + 同步 Clash Verge
+tools/      Windows 端：Python 抓取 + mihomo 内核测速 + 导出多客户端订阅 + 同步 Clash Verge
 android/    Android 端：同款逻辑的 Kotlin 实现，抓取/测速/本地订阅服务一体化 App
 ```
 
 ## 二、Windows 端（`tools/`）
 
-一条全自动流水线：**抓取 → 测速 → 按速度排序 → 过滤垃圾节点 → 生成订阅 → 同步进 Clash Verge**。
+一条全自动流水线：**抓取 → 测速 → 按速度排序 → 过滤垃圾节点 → 导出多客户端订阅 → 同步进 Clash Verge**。
 
 | 文件 | 作用 |
 |---|---|
-| `daily_auto.py` | 核心脚本。抓取 + 独立 mihomo 内核测速 + 按下载速度降序排序 + 生成订阅 + 同步 Clash Verge |
+| `daily_auto.py` | 核心脚本。抓取 + 独立 mihomo 内核测速 + 按下载速度降序排序 + 导出多客户端订阅 + 同步 Clash Verge |
 | `daily_auto.ps1` | 包装脚本：调用 `daily_auto.py`，写 UTF-8 日志并自动清理旧日志 |
 | `setup_auto.ps1` | 一键安装自动任务（每日 08:00 + 开机登录自启），无需管理员权限 |
 | `fetch_nodes.py` | 节点源清单与解析（被 `daily_auto.py` 复用） |
@@ -36,6 +37,18 @@ powershell -ExecutionPolicy Bypass -File tools\daily_auto.ps1
 ```
 
 更多参数、节点源增删（含聚合页自动发现）、自动任务安装与卸载，详见 **[tools/README.md](tools/README.md)**。
+
+### 一次运行导出 8 种订阅文件（不同客户端各拿各的）
+
+| 客户端 | 拿哪个文件 |
+|---|---|
+| Clash Verge、mihomo、FlClash、Clash Meta for Android、NekoBox | `best_nodes.yml` |
+| sing-box | `singbox-outbounds.json`（`outbounds` 片段，粘进自己的配置） |
+| v2rayN、v2rayNG、Shadowrocket | `v2ray-base64.txt`（通用 base64 订阅） |
+| Shadowsocks 系：shadowsocks-android / ss-windows / Shadowrocket | `sip008.json`、`ss-base64.txt`、`ss-plain.txt`、`gui-config.json` |
+| 手动挑节点 | `all-links.txt`（明文分享链接） |
+
+文件全部落在 `tools/output/`，细节见 **[tools/README.md](tools/README.md)** 第四节。
 
 ## 三、Android 端（`android/`）
 
@@ -52,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File tools\daily_auto.ps1
 发布新版本（App 会自动提示更新）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1 -Release -Notes "这一版改了啥"
+powershell -ExecutionPolicy Bypass -File D:\Walls\build-apk.ps1 -Release -Notes "这一版改了啥"
 ```
 
 这条命令会把版本号 +1、编译、传成 GitHub Release 资产、更新仓库里的 `version.json` 并推送。
@@ -61,9 +74,9 @@ powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1 -Release -Notes "
 构建（Windows 一键）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1              # 版本 +1 并编译
-powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1 -NoBump      # 只重编，不动版本号
-powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1 -Version 2.0 # 指定版本名
+powershell -ExecutionPolicy Bypass -File D:\Walls\build-apk.ps1              # 版本 +1 并编译
+powershell -ExecutionPolicy Bypass -File D:\Walls\build-apk.ps1 -NoBump      # 只重编，不动版本号
+powershell -ExecutionPolicy Bypass -File D:\Walls\build-apk.ps1 -Version 2.0 # 指定版本名
 ```
 
 脚本会自动把 `versionCode` 加一（覆盖安装要求新包的 versionCode 更大），编译完把成品复制成 `%USERPROFILE%\Downloads\Walls-<版本>.apk`，直接传手机装即可。

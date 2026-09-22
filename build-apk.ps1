@@ -90,7 +90,7 @@ if (-not $Release) {
 
 # ==================== 发布到 GitHub Releases + 更新 version.json ====================
 
-$Repo     = 'SzeChiaHao/Free-Clash-Verge-nodes-fetch-tool'
+$Repo     = 'SzeChiaHao/NodeKeeper'
 $Tag      = "v$newName"
 $Vc       = $newCode
 $AssetName = "Walls-$newName-vc$Vc.apk"

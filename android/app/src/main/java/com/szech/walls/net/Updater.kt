@@ -36,10 +36,10 @@ object Updater {
 
     /** 更新通道：仓库 main 分支上的 version.json */
     private const val VERSION_URL =
-        "https://raw.githubusercontent.com/SzeChiaHao/Free-Clash-Verge-nodes-fetch-tool/main/version.json"
+        "https://raw.githubusercontent.com/SzeChiaHao/NodeKeeper/main/version.json"
 
     private const val JSDELIVR =
-        "https://cdn.jsdelivr.net/gh/SzeChiaHao/Free-Clash-Verge-nodes-fetch-tool@main/version.json"
+        "https://cdn.jsdelivr.net/gh/SzeChiaHao/NodeKeeper@main/version.json"
 
     /**
      * 取 version.json 的候选地址，顺序讲究：直连 raw 最新，然后是实时透传的代理，
