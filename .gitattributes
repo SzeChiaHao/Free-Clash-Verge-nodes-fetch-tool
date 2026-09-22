@@ -1,0 +1,14 @@
+# 统一换行符，避免 Windows / Linux 互相污染
+* text=auto
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+gradlew text eol=lf
+*.sh text eol=lf
+
+# 二进制
+*.jar binary
+*.jks binary
+*.keystore binary
+*.png binary
+*.apk binary

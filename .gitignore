@@ -1,0 +1,31 @@
+# ===== 构建产物 =====
+/build/
+/android/build/
+/android/app/build/
+/android/.gradle/
+/android/.kotlin/
+/android/app/release/
+.gradle/
+.kotlin/
+*.iml
+.idea/
+captures/
+
+# ===== 本机环境与密钥（禁止入库） =====
+/android/local.properties
+*.jks
+*.keystore
+local_proxy.conf
+
+# ===== 工具运行时产物 =====
+__pycache__/
+*.pyc
+/tools/logs/
+/tools/state/
+/tools/output/
+
+# ===== 临时文件与下载包 =====
+.tmp/
+*.log
+*.zip
+*.tar.gz

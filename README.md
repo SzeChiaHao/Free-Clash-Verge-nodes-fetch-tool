@@ -1,0 +1,72 @@
+# Free Clash Verge Nodes Fetch Tool · 免费节点抓取测速管家
+
+抓取公开免费节点 → 实测延迟与下载速度 → 排序过滤 → 生成 Clash / Clash Verge 订阅。
+同一套逻辑有两个前端：Windows 上的 Python 命令行流水线，以及 Android 手机上的「节点管家」App。
+
+> 免费节点随时失效、质量参差，且有安全风险（可能记录流量）。请勿通过免费节点登录重要账号、
+> 访问明文网站或进行挖矿。本项目仅用于学习交流与访问合法内容。
+
+---
+
+## 一、目录结构
+
+```
+tools/      Windows 端：Python 抓取 + mihomo 内核测速 + 生成订阅 + 同步 Clash Verge
+android/    Android 端：同款逻辑的 Kotlin 实现，抓取/测速/本地订阅服务一体化 App
+```
+
+## 二、Windows 端（`tools/`）
+
+一条全自动流水线：**抓取 → 测速 → 按速度排序 → 过滤垃圾节点 → 生成订阅 → 同步进 Clash Verge**。
+
+| 文件 | 作用 |
+|---|---|
+| `daily_auto.py` | 核心脚本。抓取 + 独立 mihomo 内核测速 + 按下载速度降序排序 + 生成订阅 + 同步 Clash Verge |
+| `daily_auto.ps1` | 包装脚本：调用 `daily_auto.py`，写 UTF-8 日志并自动清理旧日志 |
+| `setup_auto.ps1` | 一键安装自动任务（每日 08:00 + 开机登录自启），无需管理员权限 |
+| `fetch_nodes.py` | 节点源清单与解析（被 `daily_auto.py` 复用） |
+| `node_quality.py` | mihomo 测速框架（延迟 / 下载速度） |
+| `update_nomorewalls.ps1`、`scrape_nodes.ps1` | 旧版脚本，保留备用 |
+
+快速开始：
+
+```powershell
+pip install requests pyyaml
+powershell -ExecutionPolicy Bypass -File tools\daily_auto.ps1
+```
+
+更多参数、节点源增删（含聚合页自动发现）、自动任务安装与卸载，详见 **[tools/README.md](tools/README.md)**。
+
+## 三、Android 端（`android/`）
+
+「节点管家」App：把上面那套流水线搬到手机上——内置默认节点源、后台定时抓取与测速、
+在手机本地起一个订阅 HTTP 服务，直接把订阅地址喂给 Clash / Clash Verge / 其它客户端。
+
+- 包名 `com.szech.walls`，`minSdk 26`，`targetSdk 34`，Kotlin + 原生 View。
+- 主要模块：`pipeline/`（默认节点源与流水线）、`net/`（抓取、Shadowsocks、隧道测试）、
+  `parse/`（URI 解析）、`server/`（本地订阅服务）、`export/`（订阅格式导出）、`work/`（定时任务）。
+
+构建：
+
+```bash
+cd android
+# 若仓库里没有 gradlew，可用本机 gradle 8.9 生成：gradle wrapper
+./gradlew assembleRelease          # Windows: gradlew.bat assembleRelease
+```
+
+签名信息从 `android/local.properties` 读取（该文件不入库，模板见 `android/local.properties.example`）：
+
+```properties
+sdk.dir=D\:\\Android\\Sdk
+walls.storeFile=walls-release.jks
+walls.storePassword=******
+walls.keyAlias=wallskey
+walls.keyPassword=******
+```
+
+不配置 keystore 时 `release` 自动退回默认 debug 签名，仍可正常构建。
+
+## 四、免责声明
+
+本仓库只做「公开链接的收集与测速」，不提供任何节点服务器，也不对第三方节点的可用性、
+合法性、安全性作任何担保。使用者需自行承担使用风险，并遵守所在地法律法规。

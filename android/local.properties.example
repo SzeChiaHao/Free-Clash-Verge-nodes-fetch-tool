@@ -1,0 +1,7 @@
+# 复制本文件为同目录下的 local.properties（该文件不会提交到仓库），填入本机路径与签名信息。
+sdk.dir=D\:\Android\Sdk
+# 以下四项不填则 release 使用默认 debug 签名
+walls.storeFile=walls-release.jks
+walls.storePassword=******
+walls.keyAlias=wallskey
+walls.keyPassword=******
