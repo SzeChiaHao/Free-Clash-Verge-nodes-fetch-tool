@@ -13,8 +13,8 @@ android {
         applicationId = "com.szech.walls"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -79,6 +79,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.yaml:snakeyaml:2.2")
     testImplementation("junit:junit:4.13.2")
+    // 单元测试里 org.json 会被 android.jar 的桩顶掉，显式引一份真的
+    testImplementation("org.json:json:20240303")
 }
 
 // 把 -Dwalls.* 透传给单元测试进程（真机实测用），并把测试里的 println 显示出来

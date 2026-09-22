@@ -31,6 +31,7 @@ import com.google.android.material.button.MaterialButton
 import com.szech.walls.core.Log
 import com.szech.walls.export.Formats
 import com.szech.walls.model.Node
+import com.szech.walls.net.Updater
 import com.szech.walls.pipeline.PipelineResult
 import com.szech.walls.pipeline.Runner
 import com.szech.walls.server.SubServer
@@ -75,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         if (Repo.nodes.isEmpty()) {
             Log.add("提示：点「开始更新」就会抓取 + 测速 + 生成订阅。首次运行约 1~3 分钟。")
         }
+        checkUpdate(manual = false)
     }
 
     override fun onResume() {
@@ -300,7 +302,8 @@ class MainActivity : AppCompatActivity() {
             "只保留可实测协议的节点" to { toggleBool("只保留可实测协议的节点") { Prefs.measurableOnly = it } },
             "节点名加上速度前缀" to { toggleBool("节点名加上速度前缀") { Prefs.labelSpeed = it } },
             "每天自动更新" to { toggleBool("每天自动更新") { Prefs.autoDaily = it; Runner.schedule(this, it) } },
-            "编辑订阅源" to { showSourcesDialog() }
+            "编辑订阅源" to { showSourcesDialog() },
+            "检查更新" to { checkUpdate(manual = true) }
         )
         for ((label, action) in settings) {
             val row = LinearLayout(this).apply {
@@ -358,6 +361,7 @@ class MainActivity : AppCompatActivity() {
         "节点名加上速度前缀" -> if (Prefs.labelSpeed) "开" else "关"
         "每天自动更新" -> if (Prefs.autoDaily) "开" else "关"
         "编辑订阅源" -> "${Prefs.sources.size} 个"
+        "检查更新" -> "v" + currentVersion().first
         else -> ""
     }
 
@@ -683,6 +687,119 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    // =============================================================== 自动更新
+
+    /** 本机版本：versionName 与 versionCode */
+    private fun currentVersion(): Pair<String, Int> {
+        return try {
+            val pi = packageManager.getPackageInfo(packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                pi.longVersionCode.toInt()
+            } else {
+                pi.versionCode
+            }
+            Pair(pi.versionName ?: "?", code)
+        } catch (e: Exception) {
+            Pair("?", 0)
+        }
+    }
+
+    private fun checkUpdate(manual: Boolean) {
+        lifecycleScope.launch {
+            val (curName, curCode) = currentVersion()
+            val info = withContext(Dispatchers.IO) { Updater.fetchLatest() }
+            if (info == null) {
+                if (manual) toast("检查更新失败：拿不到版本信息（网络问题？）")
+                return@launch
+            }
+            if (!Updater.isNewer(info, curName, curCode)) {
+                Log.add("检查更新：已是最新版 v$curName")
+                if (manual) toast("已是最新版本 v$curName")
+                return@launch
+            }
+            Log.add("发现新版本 v${info.versionName}（当前 v$curName）")
+            val sizeText = if (info.size > 0) String.format("%.1f MB", info.size / 1048576.0) else "未知大小"
+            val msg = buildString {
+                append("当前版本：v").append(curName).append('\n')
+                append("最新版本：v").append(info.versionName).append("（").append(sizeText).append("）\n")
+                if (info.publishedAt.isNotEmpty()) append("发布时间：").append(info.publishedAt).append('\n')
+                if (info.notes.isNotEmpty()) append('\n').append(info.notes)
+            }
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("发现新版本")
+                .setMessage(msg)
+                .setPositiveButton("下载并安装") { _, _ -> downloadAndInstall(info) }
+                .setNegativeButton("稍后", null)
+                .show()
+        }
+    }
+
+    private fun downloadAndInstall(info: Updater.Release) {
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 0
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(6)
+            ).apply { setMargins(dp(20), dp(10), dp(20), 0) }
+        }
+        val tip = TextView(this).apply {
+            text = "正在下载 v${info.versionName}…"
+            textSize = 13f
+            setPadding(dp(20), dp(10), dp(20), dp(4))
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(tip)
+            addView(bar)
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("下载更新")
+            .setView(box)
+            .setCancelable(false)
+            .setNegativeButton("取消", null)
+            .create()
+        dlg.show()
+
+        lifecycleScope.launch {
+            val file = withContext(Dispatchers.IO) {
+                Updater.download(this@MainActivity, info, onProgress = { done, total ->
+                    val pct = if (total > 0) (done * 100 / total).toInt() else 0
+                    runOnUiThread {
+                        bar.progress = pct
+                        tip.text = if (total > 0) {
+                            "正在下载 v${info.versionName}… ${pct}%（${done / 1048576} / ${total / 1048576} MB）"
+                        } else {
+                            "正在下载 v${info.versionName}… ${done / 1048576} MB"
+                        }
+                    }
+                })
+            }
+            dlg.dismiss()
+            if (file == null) {
+                Log.add("下载更新失败")
+                toast("下载失败，可稍后再试")
+                return@launch
+            }
+            Log.add("更新包已下载：${file.name}")
+            if (!Updater.canInstall(this@MainActivity)) {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("还差一步")
+                    .setMessage("系统需要你允许「节点管家」安装应用。点确定去设置里打开这个开关，然后回到本页再点一次「检查更新」。")
+                    .setPositiveButton("去设置") { _, _ -> Updater.openInstallPermissionSettings(this@MainActivity) }
+                    .setNegativeButton("取消", null)
+                    .show()
+                return@launch
+            }
+            val err = Updater.install(this@MainActivity, file)
+            if (err != null) {
+                Log.add("调起安装失败：$err")
+                toast("调起安装失败：$err")
+            } else {
+                toast("已调起系统安装器，按提示覆盖安装即可")
+            }
+        }
     }
 
     private fun copy(text: String, tip: String) {

@@ -99,10 +99,38 @@ trojan  5.6.7.8 443   <pass>  ws       -    example.com               /path
 签名信息从 `local.properties` 读（该文件不入库，模板见 `local.properties.example`）；
 没配 keystore 时 release 自动退回 debug 签名，仍可构建。
 
+## 五、App 内自动更新
+
+更新信息**不查 GitHub API**，而是读仓库里的 `version.json`——因为 jsDelivr / gh-proxy 这类镜像能拿仓库文件，
+却不一定能代理 `api.github.com`，在国内网络下这条路更稳。
+
+```json
+{
+  "versionName": "1.3",
+  "versionCode": 4,
+  "apk": "https://github.com/.../releases/download/v1.3/Walls-1.3-vc4.apk",
+  "size": 4796274,
+  "sha256": "…",
+  "notes": "这一版改了啥",
+  "publishedAt": "2026-09-22 20:08"
+}
+```
+
+取文件的顺序是：直连 raw → gh-proxy / ghproxy.net（实时透传）→ jsDelivr（有缓存，可能旧好几个小时，只当兜底）。
+下载安装包同理，直连失败自动加代理前缀重试，下完核对 `sha256` 再装。
+
+触发条件就一个：**`version.json` 里的 `versionCode` 比本机大**（比不出来时退回比版本号）。
+所以平时发代码 commit 不会打扰用户，只有真出包时才提示。
+
+坑记录：PowerShell 的 `Set-Content -Encoding UTF8` 会写 BOM，`JSONObject` 遇到 BOM 直接抛异常。
+发布脚本已改成写不带 BOM 的 UTF-8，`Updater.parse` 也顺手清一下 BOM 兜底。
+
 ## 五、已知问题与待办
 
 - **vmess 还没实现**。它在免费节点里占比很高（一次真实抓取里 136 个），
   需要按 AEAD 规范做 KDF、AuthID、请求头加密与分块读写。
+- **自动更新最后一步依赖系统安装器**：调起安装器没问题，但「允许安装未知应用」这个开关只能用户在系统设置里点头，
+  不打开的话 App 会引导过去（`ACTION_MANAGE_UNKNOWN_APP_SOURCES`）。
 - **trojan 只有线上验证缺口**：协议实现和线格式测试都完成了，但手上那批样本节点里
   唯一的 trojan 节点前端已经挂掉（返回 403），没法做端到端确认。
 - reality / vision / xhttp / gRPC / QUIC 系协议测不了，只能在报告里标「仅 TCP 延迟」。

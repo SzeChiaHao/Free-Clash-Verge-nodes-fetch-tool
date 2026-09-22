@@ -49,6 +49,15 @@ powershell -ExecutionPolicy Bypass -File tools\daily_auto.ps1
   Shadowsocks（AEAD / 流式）、Trojan（tcp / ws + TLS）、VLESS（tcp / ws + TLS）。
   做法是拿一批「mihomo 能跑通」的节点当标准答案，做端到端比对，详见 **[android/README.md](android/README.md)**。
 
+发布新版本（App 会自动提示更新）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\Wallsuild-apk.ps1 -Release -Notes "这一版改了啥"
+```
+
+这条命令会把版本号 +1、编译、传成 GitHub Release 资产、更新仓库里的 `version.json` 并推送。
+手机上的 App 就是盯着 `version.json` 的 `versionCode` —— 它变大了就提示升级，所以平时发代码 commit 不会打扰用户。
+
 构建（Windows 一键）：
 
 ```powershell
