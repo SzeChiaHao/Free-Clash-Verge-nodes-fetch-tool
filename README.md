@@ -43,8 +43,11 @@ powershell -ExecutionPolicy Bypass -File tools\daily_auto.ps1
 在手机本地起一个订阅 HTTP 服务，直接把订阅地址喂给 Clash / Clash Verge / 其它客户端。
 
 - 包名 `com.szech.walls`，`minSdk 26`，`targetSdk 34`，Kotlin + 原生 View。
-- 主要模块：`pipeline/`（默认节点源与流水线）、`net/`（抓取、Shadowsocks、隧道测试）、
+- 主要模块：`pipeline/`（默认节点源与流水线）、`net/`（抓取与自研隧道客户端）、
   `parse/`（URI 解析）、`server/`（本地订阅服务）、`export/`（订阅格式导出）、`work/`（定时任务）。
+- 手机上没有 mihomo 内核，所以**测速用的协议客户端是自己实现的**：
+  Shadowsocks（AEAD / 流式）、Trojan（tcp / ws + TLS）、VLESS（tcp / ws + TLS）。
+  做法是拿一批「mihomo 能跑通」的节点当标准答案，做端到端比对，详见 **[android/README.md](android/README.md)**。
 
 构建：
 

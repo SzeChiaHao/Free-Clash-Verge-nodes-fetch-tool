@@ -58,6 +58,11 @@ class MainActivity : AppCompatActivity() {
 
     private var running = false
 
+    /** 点了「停止」后置位，流水线在每个工作单元之间检查它 */
+    @Volatile
+    private var cancelRequested = false
+    private var runJob: kotlinx.coroutines.Job? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Prefs.init(this)
@@ -162,7 +167,7 @@ class MainActivity : AppCompatActivity() {
             setTypeface(typeface, Typeface.BOLD)
         })
         header.addView(TextView(this).apply {
-            text = "免费节点抓取 · 实测测速 · 按速度排序 · 本地订阅"
+            text = "免费节点抓取 · 真实隧道测速 · 按速度排序 · 本地订阅"
             setTextColor(0xFFD6E4FF.toInt())
             textSize = 12f
             setPadding(0, dp(3), 0, 0)
@@ -218,7 +223,7 @@ class MainActivity : AppCompatActivity() {
         btnStop.layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f).apply {
             setMargins(dp(6), 0, 0, 0)
         }
-        btnStop.setOnClickListener { running = false }
+        btnStop.setOnClickListener { requestStop() }
         row1.addView(btnStop)
         c1.addView(row1)
         col.addView(c1)
@@ -273,7 +278,7 @@ class MainActivity : AppCompatActivity() {
         // ---- 节点列表卡片 ----
         val c3 = card()
         c3.addView(title("节点排名"))
-        c3.addView(dim("按实测下载速度降序。点一行可看详情 / 复制分享链接。"))
+        c3.addView(dim("按实测下载速度降序。目前能真实测速的协议：Shadowsocks / Trojan / VLESS（tcp 或 ws + tls）。"))
         nodeBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         c3.addView(nodeBox)
         col.addView(c3)
@@ -292,7 +297,7 @@ class MainActivity : AppCompatActivity() {
             "最低合格速度(0.1MB/s)" to {
                 showNumberDialog("低于该速度的节点被过滤（单位 0.1 MB/s）", Prefs.minSpeedTenths, 0, 100) { Prefs.minSpeedTenths = it }
             },
-            "只保留 Shadowsocks 节点" to { toggleBool("只保留 Shadowsocks 节点") { Prefs.ssOnly = it } },
+            "只保留可实测协议的节点" to { toggleBool("只保留可实测协议的节点") { Prefs.measurableOnly = it } },
             "节点名加上速度前缀" to { toggleBool("节点名加上速度前缀") { Prefs.labelSpeed = it } },
             "每天自动更新" to { toggleBool("每天自动更新") { Prefs.autoDaily = it; Runner.schedule(this, it) } },
             "编辑订阅源" to { showSourcesDialog() }
@@ -349,7 +354,7 @@ class MainActivity : AppCompatActivity() {
         "测速节点数量" -> Prefs.speedTop.toString()
         "每个节点测速流量(KB)" -> "${Prefs.speedBytesKb} KB"
         "最低合格速度(0.1MB/s)" -> "${Prefs.minSpeedTenths / 10.0} MB/s"
-        "只保留 Shadowsocks 节点" -> if (Prefs.ssOnly) "开" else "关"
+        "只保留可实测协议的节点" -> if (Prefs.measurableOnly) "开" else "关"
         "节点名加上速度前缀" -> if (Prefs.labelSpeed) "开" else "关"
         "每天自动更新" -> if (Prefs.autoDaily) "开" else "关"
         "编辑订阅源" -> "${Prefs.sources.size} 个"
@@ -516,12 +521,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
         running = true
+        cancelRequested = false
         progress.visibility = View.VISIBLE
         progress.progress = 0
         progressText.text = "准备中…"
         if (quick) Prefs.quick = true else Prefs.quick = false
         Log.add(if (quick) "=== 开始快速更新（只测 TCP 延迟）===" else "=== 开始完整更新（抓取 + 实测测速）===")
-        lifecycleScope.launch {
+        runJob = lifecycleScope.launch {
             val res: PipelineResult = withContext(Dispatchers.IO) {
                 try {
                     Runner.runNow(
@@ -531,7 +537,8 @@ class MainActivity : AppCompatActivity() {
                                 progressText.text = "$stage $done/$total"
                                 progress.progress = if (total > 0) done * 100 / total else 0
                             }
-                        }
+                        },
+                        isCancelled = { cancelRequested }
                     )
                 } catch (e: Exception) {
                     Log.add("出错：${e.message}")
@@ -539,13 +546,40 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             running = false
+            runJob = null
             progress.visibility = View.GONE
             progressText.text = ""
-            Log.add("=== 结束：入选 ${res.nodes.size} 个节点 ===")
-            if (res.nodes.isEmpty()) toast("没有抓到可用节点，保留上次结果")
-            else toast("完成，共 ${res.nodes.size} 个节点")
+            when {
+                res.cancelled -> {
+                    Log.add("=== 已停止 ===")
+                    toast("已停止，保留上次结果")
+                }
+                res.nodes.isEmpty() -> {
+                    Log.add("=== 结束：没有可用节点 ===")
+                    toast("没有抓到可用节点，保留上次结果")
+                }
+                else -> {
+                    Log.add("=== 结束：入选 ${res.nodes.size} 个节点 ===")
+                    toast("完成，共 ${res.nodes.size} 个节点")
+                }
+            }
             renderAll()
         }
+    }
+
+    /**
+     * 协作式停止：不直接杀协程，只置标志位。
+     * 流水线在每个节点、每个阶段之间检查它，所以一般一两秒内就会干净收尾，
+     * 不会留下没关掉的 socket。
+     */
+    private fun requestStop() {
+        if (!running) {
+            toast("当前没有任务在跑")
+            return
+        }
+        cancelRequested = true
+        progressText.text = "正在停止…"
+        Log.add("已请求停止，等待正在测的节点收尾…")
     }
 
     private fun isServiceRunning(): Boolean {
@@ -580,7 +614,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleBool(label: String, set: (Boolean) -> Unit) {
         val cur = when (label) {
-            "只保留 Shadowsocks 节点" -> Prefs.ssOnly
+            "只保留可实测协议的节点" -> Prefs.measurableOnly
             "节点名加上速度前缀" -> Prefs.labelSpeed
             "每天自动更新" -> Prefs.autoDaily
             else -> false

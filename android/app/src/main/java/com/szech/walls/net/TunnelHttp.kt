@@ -4,54 +4,17 @@ import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.Socket
-import java.net.SocketAddress
 import java.net.SocketTimeoutException
-import java.nio.channels.SocketChannel
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
 /**
- * 把 Shadowsocks 隧道伪装成一个普通 Socket，交给平台自带的 SSLSocketFactory，
- * 这样就能直接做真正的 TLS 请求（HTTPS），测出来的延迟/速度与 Clash 里的一致。
+ * 借一条已经建好的代理隧道，发一个真正的 HTTP(S) 请求。
+ *
+ * 关键点：如果是 HTTPS，就在隧道之上再套一层平台 TLS —— 用 StreamSocket 把隧道
+ * 伪装成 Socket 喂给 SSLSocketFactory，这样测出来的延迟/速度和 Clash 里跑的一致。
  */
-class TunnelSocket(
-    private val conn: SsConnection,
-    private val host: String,
-    private val port: Int
-) : Socket() {
-
-    override fun getInputStream(): InputStream = conn.inputStream
-    override fun getOutputStream() = conn.outputStream
-    override fun isConnected(): Boolean = true
-    override fun isClosed(): Boolean = conn.isClosed
-    override fun close() = conn.close()
-    override fun getInetAddress(): InetAddress = conn.remoteAddress
-    override fun getPort(): Int = port
-    override fun getLocalAddress(): InetAddress = conn.localAddress
-    override fun getLocalPort(): Int = conn.localPort
-    override fun getSoTimeout(): Int = conn.soTimeoutMs
-    override fun setSoTimeout(timeout: Int) {
-        conn.setReadTimeout(timeout)
-    }
-    override fun getTcpNoDelay(): Boolean = true
-    override fun setTcpNoDelay(on: Boolean) {}
-    override fun isInputShutdown(): Boolean = false
-    override fun isOutputShutdown(): Boolean = false
-    override fun shutdownInput() {}
-    override fun shutdownOutput() {}
-    override fun getChannel(): SocketChannel? = null
-    override fun getRemoteSocketAddress(): SocketAddress = InetSocketAddress(host, port)
-    override fun getLocalSocketAddress(): SocketAddress = InetSocketAddress("127.0.0.1", 0)
-    override fun setKeepAlive(on: Boolean) {}
-    override fun getKeepAlive(): Boolean = false
-    override fun setSoLinger(on: Boolean, linger: Int) {}
-    override fun getSoLinger(): Int = -1
-    override fun toString(): String = "TunnelSocket($host:$port)"
-}
-
 object TunnelHttp {
 
     class Resp(
@@ -76,11 +39,10 @@ object TunnelHttp {
     }
 
     /**
-     * 通过已建好的隧道发一个 HTTP(S) 请求。
      * @param maxBytes 最多读取多少响应体（0 表示只读响应头）
      */
     fun get(
-        conn: SsConnection,
+        tunnel: Tunnel,
         tls: Boolean,
         host: String,
         port: Int,
@@ -90,10 +52,10 @@ object TunnelHttp {
         bodyTimeoutMs: Int
     ): Resp {
         val t0 = System.currentTimeMillis()
-        var sock: Socket = TunnelSocket(conn, host, port)
+        var sock: Socket = StreamSocket(tunnel, host, port)
         try {
             if (tls) {
-                conn.setReadTimeout(handshakeTimeoutMs)
+                tunnel.setReadTimeout(handshakeTimeoutMs)
                 val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
                 val ssl = factory.createSocket(sock, host, port, false) as SSLSocket
                 ssl.soTimeout = handshakeTimeoutMs
@@ -134,7 +96,7 @@ object TunnelHttp {
 
             var total = 0L
             if (maxBytes > 0) {
-                conn.setReadTimeout(bodyTimeoutMs)
+                tunnel.setReadTimeout(bodyTimeoutMs)
                 val buf = ByteArray(65536)
                 if (chunked) {
                     while (total < maxBytes) {

@@ -16,21 +16,23 @@ import java.util.concurrent.TimeUnit
 /** 把偏好设置变成一次流水线配置，并负责跑完落盘、重启订阅服务。 */
 object Runner {
 
-    fun config(): PipelineConfig = PipelineConfig(
+    fun config(isCancelled: () -> Boolean = { false }): PipelineConfig = PipelineConfig(
         sources = Prefs.sources + Prefs.discovered,
         maxNodes = Prefs.maxNodes,
         speedTop = Prefs.speedTop,
         speedBytes = Prefs.speedBytesKb * 1024,
         minSpeedMbps = Prefs.minSpeedTenths / 10.0,
         keepTop = Prefs.keepTop,
-        ssOnly = Prefs.ssOnly,
+        measurableOnly = Prefs.measurableOnly,
         labelSpeed = Prefs.labelSpeed,
-        quick = Prefs.quick
+        quick = Prefs.quick,
+        isCancelled = isCancelled
     )
 
     suspend fun runNow(
         onLog: (String) -> Unit = { Log.add(it) },
-        onProgress: (String, Int, Int) -> Unit = { _, _, _ -> }
+        onProgress: (String, Int, Int) -> Unit = { _, _, _ -> },
+        isCancelled: () -> Boolean = { false }
     ): PipelineResult {
         Repo.status = RunStatus(
             lastRunAt = Repo.status.lastRunAt,
@@ -38,7 +40,7 @@ object Runner {
             message = "运行中…"
         )
         val t0 = System.currentTimeMillis()
-        val res = Pipeline.run(config(), onLog, onProgress)
+        val res = Pipeline.run(config(isCancelled), onLog, onProgress)
         val st = RunStatus(
             lastRunAt = System.currentTimeMillis(),
             candidates = res.candidates,
@@ -47,9 +49,11 @@ object Runner {
             sourcesOk = res.sourcesOk,
             sourcesFail = res.sourcesFail,
             kept = res.nodes.size,
-            message = if (res.nodes.isEmpty()) "本次没有可用节点，保留上次结果" else "完成，用时 ${
-                (System.currentTimeMillis() - t0) / 1000
-            } 秒",
+            message = when {
+                res.cancelled -> "已取消（保留上次结果）"
+                res.nodes.isEmpty() -> "本次没有可用节点，保留上次结果"
+                else -> "完成，用时 ${(System.currentTimeMillis() - t0) / 1000} 秒"
+            },
             running = false
         )
         if (res.nodes.isNotEmpty()) {

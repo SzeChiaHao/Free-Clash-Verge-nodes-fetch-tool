@@ -51,9 +51,10 @@ object Prefs {
         get() = sp.getInt("minSpeedTenths", 2)
         set(v) = sp.edit().putInt("minSpeedTenths", v).apply()
 
-    var ssOnly: Boolean
-        get() = sp.getBoolean("ssOnly", true)
-        set(v) = sp.edit().putBoolean("ssOnly", v).apply()
+    /** 只保留「本机能真实测速」的协议（ss / trojan / vless），其余协议只做 TCP 延迟、默认不选 */
+    var measurableOnly: Boolean
+        get() = sp.getBoolean("measurableOnly", true)
+        set(v) = sp.edit().putBoolean("measurableOnly", v).apply()
 
     var labelSpeed: Boolean
         get() = sp.getBoolean("labelSpeed", true)

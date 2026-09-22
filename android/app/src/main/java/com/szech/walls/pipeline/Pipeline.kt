@@ -3,8 +3,8 @@ package com.szech.walls.pipeline
 import com.szech.walls.core.Log
 import com.szech.walls.model.Node
 import com.szech.walls.net.Fetcher
-import com.szech.walls.net.SsConnection
-import com.szech.walls.net.TunnelHttp
+import com.szech.walls.net.TunnelFactory
+import com.szech.walls.net.skipCertVerify
 import com.szech.walls.parse.UriParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -19,7 +19,7 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 
 class PipelineConfig(
-    var sources: List<String> = DefaultSources.LIST,
+    var sources: List<String> = com.szech.walls.pipeline.DefaultSources.LIST,
     var maxNodes: Int = 600,
     var tcpTimeoutMs: Int = 2500,
     var maxDelayMs: Int = 3000,
@@ -28,9 +28,12 @@ class PipelineConfig(
     var minSpeedMbps: Double = 0.2,
     var keepTop: Int = 40,
     var speedBytes: Int = 512 * 1024,
-    var ssOnly: Boolean = true,
+    /** 只保留「本机能真实测速」的协议（ss / trojan / vless） */
+    var measurableOnly: Boolean = true,
     var labelSpeed: Boolean = true,
-    var quick: Boolean = false
+    var quick: Boolean = false,
+    /** 协作式取消：界面点了「停止」后为 true */
+    var isCancelled: () -> Boolean = { false }
 )
 
 class PipelineResult(
@@ -40,25 +43,11 @@ class PipelineResult(
     val measured: Int,
     val sourcesOk: Int,
     val sourcesFail: Int,
-    val elapsedMs: Long
+    val elapsedMs: Long,
+    val cancelled: Boolean = false
 )
 
-/** 一个被测目标 */
-data class Target(val host: String, val port: Int, val path: String, val tls: Boolean)
-
 object Pipeline {
-
-    private val LATENCY_TARGETS = listOf(
-        Target("www.gstatic.com", 443, "/generate_204", true),
-        Target("cp.cloudflare.com", 443, "/generate_204", true),
-        Target("connectivitycheck.gstatic.com", 80, "/generate_204", false)
-    )
-
-    private val SPEED_TARGETS = listOf(
-        Target("speed.cloudflare.com", 443, "/__down?bytes=%%N%%", true),
-        Target("speed.cloudflare.com", 80, "/__down?bytes=%%N%%", false),
-        Target("cachefly.cachefly.net", 80, "/1mb.test", false)
-    )
 
     fun tcpDelay(host: String, port: Int, timeoutMs: Int): Int {
         val t0 = System.currentTimeMillis()
@@ -100,6 +89,12 @@ object Pipeline {
         val start = System.currentTimeMillis()
         val fetcher = Fetcher(timeoutMs = 12000)
 
+        fun cancelledResult(candidates: Int = 0, alive: Int = 0, ok: Int = 0, fail: Int = 0) =
+            PipelineResult(
+                emptyList(), candidates, alive, 0, ok, fail,
+                System.currentTimeMillis() - start, cancelled = true
+            )
+
         // ---------- 阶段 1：抓取 ----------
         onLog("== 阶段 1/3：抓取订阅源（共 ${cfg.sources.size} 个）==")
         val perSource = Collections.synchronizedList(ArrayList<FetchOutcome>())
@@ -109,6 +104,7 @@ object Pipeline {
             cfg.sources.distinct().map { src ->
                 async {
                     srcSem.withPermit {
+                        if (cfg.isCancelled()) return@withPermit
                         val r = try {
                             fetchOne(src, fetcher, 16)
                         } catch (e: Exception) {
@@ -127,6 +123,11 @@ object Pipeline {
             }.awaitAll()
         }
 
+        if (cfg.isCancelled()) {
+            onLog("已取消")
+            return@withContext cancelledResult()
+        }
+
         val okCount = perSource.count { it.ok }
         val failCount = perSource.size - okCount
 
@@ -140,12 +141,15 @@ object Pipeline {
         onLog("抓取完成：原始 ${rawList.size} 条，去重过滤后 ${merged.size} 条（丢弃 ${dups} 条）")
 
         if (merged.isEmpty()) {
-            return@withContext PipelineResult(emptyList(), 0, 0, 0, okCount, failCount, System.currentTimeMillis() - start)
+            return@withContext PipelineResult(
+                emptyList(), 0, 0, 0, okCount, failCount, System.currentTimeMillis() - start
+            )
         }
 
         // 轮转挑选，避免总是偏向排在前面的源
         val limited = merged.take(cfg.maxNodes)
-        onLog("进入测速的候选节点：${limited.size}")
+        val measurableCount = limited.count { TunnelFactory.measurable(it) }
+        onLog("进入测速的候选节点：${limited.size}（其中可实测协议 $measurableCount 个）")
 
         // ---------- 阶段 2：TCP 延迟 ----------
         onLog("== 阶段 2/3：TCP 延迟测试 ==")
@@ -156,6 +160,7 @@ object Pipeline {
             limited.map { n ->
                 async {
                     tcpSem.withPermit {
+                        if (cfg.isCancelled()) return@withPermit
                         val d = tcpDelay(n.server, n.port, cfg.tcpTimeoutMs)
                         if (d > 0 && d <= cfg.maxDelayMs) {
                             n.delay = d
@@ -167,34 +172,44 @@ object Pipeline {
                 }
             }.awaitAll()
         }
+        if (cfg.isCancelled()) {
+            onLog("已取消")
+            return@withContext cancelledResult(limited.size, aliveNodes.size, okCount, failCount)
+        }
         val alive = aliveNodes.sortedBy { it.delay }
         onLog("TCP 可达：${alive.size} / ${limited.size}")
 
         if (alive.isEmpty()) {
-            return@withContext PipelineResult(emptyList(), limited.size, 0, 0, okCount, failCount, System.currentTimeMillis() - start)
+            return@withContext PipelineResult(
+                emptyList(), limited.size, 0, 0, okCount, failCount,
+                System.currentTimeMillis() - start
+            )
         }
 
-        // ---------- 阶段 2b：真实隧道测速（Shadowsocks） ----------
+        // ---------- 阶段 2b：真实隧道测速 ----------
         var measured = 0
         if (!cfg.quick) {
-            val ssPool = alive.filter { it.type == "ss" }
+            val pool = alive.filter { TunnelFactory.measurable(it) }
                 .filter { it.delay <= cfg.speedMaxDelayMs }
                 .take(cfg.speedTop)
-            onLog("== 阶段 2b/3：通过节点实测延迟与下载速度（${ssPool.size} 个 ss 节点）==")
-            if (ssPool.isNotEmpty()) {
+            onLog("== 阶段 2b/3：通过节点实测握手延迟与下载速度（${pool.size} 个）==")
+            if (pool.isNotEmpty()) {
                 val speedDone = AtomicInteger(0)
                 val speedSem = Semaphore(12)
                 coroutineScope {
-                    ssPool.map { n ->
+                    pool.map { n ->
                         async {
                             speedSem.withPermit {
+                                if (cfg.isCancelled()) return@withPermit
                                 testOne(n, cfg)
                                 if (n.speed >= 0) measured++
                                 val c = speedDone.incrementAndGet()
-                                onProgress("实测速度", c, ssPool.size)
-                                if (c % 5 == 0 || c == ssPool.size) {
-                                    onLog("  实测 $c/${ssPool.size}：${n.name} -> " +
-                                        (if (n.speed >= 0) String.format("%.2f MB/s", n.speed) else "失败"))
+                                onProgress("实测速度", c, pool.size)
+                                if (c % 5 == 0 || c == pool.size) {
+                                    onLog(
+                                        "  实测 $c/${pool.size}：${n.name} -> " +
+                                            (if (n.speed >= 0) String.format("%.2f MB/s", n.speed) else "失败")
+                                    )
                                 }
                             }
                         }
@@ -202,12 +217,19 @@ object Pipeline {
                 }
             }
         }
+        if (cfg.isCancelled()) {
+            onLog("已取消")
+            return@withContext cancelledResult(limited.size, alive.size, okCount, failCount)
+        }
 
-        // 没测出不支持实测的节点，标注一下
+        // 没测出速度的节点，标注一下原因
         for (n in alive) {
-            if (n.type != "ss") n.note = "仅 TCP 延迟（${n.type}）"
-            else if (n.speed < 0 && n.realDelay < 0) {
-                if (n.note.isEmpty()) n.note = "实测未通"
+            if (n.note.isEmpty() && n.realDelay < 0) {
+                n.note = if (TunnelFactory.measurable(n)) {
+                    "实测未通"
+                } else {
+                    "仅 TCP 延迟（${n.type}）"
+                }
             }
         }
 
@@ -222,63 +244,23 @@ object Pipeline {
 
     // ------------------------------------------------------------ 实测
 
+    /**
+     * 对一个节点做真实隧道测速，结果写回节点本身。
+     */
     private fun testOne(n: Node, cfg: PipelineConfig) {
-        val probe = SsConnection(
-            n.server, n.port, n.cipher, n.password,
-            connectTimeoutMs = 6000, soTimeoutMs = 6000
-        )
-        if (!probe.isSupported()) {
-            n.note = probe.unsupportedReason()
+        if (TunnelFactory.create(n, insecure = n.skipCertVerify) == null) {
+            n.note = TunnelFactory.unsupportedReason(n)
             return
         }
-        try {
-            // 1) 真实延迟：204 探测
-            var latOk = false
-            for (t in LATENCY_TARGETS) {
-                val lat = try {
-                    val c = SsConnection(n.server, n.port, n.cipher, n.password, 6000, 6000)
-                    c.connectSocket()
-                    c.openTunnel(t.host, t.port)
-                    val r = TunnelHttp.get(c, t.tls, t.host, t.port, t.path, 0, 6000, 6000)
-                    c.close()
-                    r
-                } catch (e: Exception) {
-                    null
-                }
-                if (lat != null && lat.ok) {
-                    n.realDelay = lat.ttfbMs.toInt()
-                    latOk = true
-                    break
-                }
-            }
-            if (!latOk) {
-                n.note = if (n.note.isEmpty()) "实测未通" else n.note
-                return
-            }
-
-            // 2) 真实下载速度
-            if (cfg.speedBytes <= 0) return
-            for (t in SPEED_TARGETS) {
-                val path = t.path.replace("%%N%%", cfg.speedBytes.toString())
-                val c = SsConnection(n.server, n.port, n.cipher, n.password, 6000, 9000)
-                try {
-                    c.connectSocket()
-                    c.openTunnel(t.host, t.port)
-                    val r = TunnelHttp.get(c, t.tls, t.host, t.port, path, cfg.speedBytes, 8000, 9000)
-                    if (r.ok && r.bytes > 16 * 1024 && r.elapsedMs > 0) {
-                        val mbps = r.bytes.toDouble() / (r.elapsedMs.toDouble() / 1000.0) / 1e6
-                        n.speed = mbps
-                        n.note = ""
-                        break
-                    }
-                } catch (e: Exception) {
-                    // 换下一个目标
-                } finally {
-                    c.close()
-                }
-            }
-        } catch (e: Exception) {
-            if (n.note.isEmpty()) n.note = "实测异常"
+        val r = Prober.measureWithFallback(n, cfg.speedBytes, cfg.isCancelled)
+        if (r == null) {
+            if (n.note.isEmpty()) n.note = "实测未通"
+            return
+        }
+        n.realDelay = r.latencyMs
+        if (r.speedMbps > 0) {
+            n.speed = r.speedMbps
+            n.note = ""
         }
     }
 
@@ -306,7 +288,6 @@ object Pipeline {
         }
         // 节点名去重
         val names = HashSet<String>()
-        var i = 1
         for (n in out) {
             var base = n.name
             if (base.isBlank()) base = "${n.server}:${n.port}"
@@ -317,7 +298,6 @@ object Pipeline {
                 k++
             }
             if (name != n.map["name"]) n.map["name"] = name
-            i++
         }
         return out to dropped
     }
@@ -325,7 +305,7 @@ object Pipeline {
     private fun order(alive: List<Node>, cfg: PipelineConfig): List<Node> {
         val list = ArrayList<Node>()
         for (n in alive) {
-            if (cfg.ssOnly && !n.isShadowsocks) continue
+            if (cfg.measurableOnly && !TunnelFactory.measurable(n)) continue
             list.add(n)
         }
         val withSpeed = list.filter { it.speed > 0 }.sortedWith(
@@ -346,13 +326,13 @@ object Pipeline {
         }
 
         val out = ArrayList<Node>()
-        var rank = 1
         for (n in result.take(cfg.keepTop)) {
             val node = if (cfg.labelSpeed && n.speed > 0 && !n.name.contains("MB/s")) {
                 n.withName(String.format("%.1fMB/s ", n.speed) + n.name)
-            } else n
+            } else {
+                n
+            }
             out.add(node)
-            rank++
         }
         return out
     }

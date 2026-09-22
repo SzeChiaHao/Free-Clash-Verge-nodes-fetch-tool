@@ -13,8 +13,8 @@ android {
         applicationId = "com.szech.walls"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -78,4 +78,17 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.yaml:snakeyaml:2.2")
+    testImplementation("junit:junit:4.13.2")
+}
+
+// 把 -Dwalls.* 透传给单元测试进程（真机实测用），并把测试里的 println 显示出来
+tasks.withType<Test>().configureEach {
+    System.getProperties().forEach { key, value ->
+        val k = key.toString()
+        if (k.startsWith("walls.")) systemProperty(k, value.toString())
+    }
+    testLogging {
+        showStandardStreams = true
+        events("passed", "failed", "skipped")
+    }
 }
