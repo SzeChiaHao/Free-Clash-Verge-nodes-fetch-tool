@@ -53,18 +53,43 @@ python D:\Walls\tools\daily_auto.py --no-label         # 不给节点名加速�
 
 常用参数：`--max-nodes`（进入测速的候选上限，默认 600）、`--max-delay`（延迟阈值 ms，默认 3000）、
 `--speed-top`（做下载测速的节点数，默认 150）、`--speed-max-delay`（参与测速的延迟上限 ms，默认 1500）、
-`--min-speed`（合格最低速度 MB/s，默认 0.2）、`--top`（最终保留数，默认 40）。
+`--min-speed`（合格最低速度 MB/s，默认 0.2）、`--top`（最终保留数，默认 40）、`--min-per-type` / `--keep-per-type`（协议保底与配额）、`--exclude-types`（排除某些协议，例如 `http,socks5`）。
 
 ## 四、输出文件（`D:\Walls\tools\output\`）
 
-| 文件 | 说明 |
+跑完一次会同时产出好几种格式，**不同客户端各拿各的**：
+
+| 文件 | 给谁用 |
 |---|---|
-| `best_nodes.yml` | **最终订阅**。节点已按下载速度降序排列，每个节点名带 `X.XMB/s ` 实测速度前缀 |
+| `best_nodes.yml` | **Clash 系**：Clash Verge、Clash Meta for Android、FlClash、NekoBox、mihomo。节点按实测下载速度降序，名字带 `X.XMB/s ` 前缀 |
+| `sip008.json` | **Shadowsocks 官方 JSON 订阅**：shadowsocks-android、ss-windows、sing-box 都认 |
+| `ss-base64.txt` | base64 的 `ss://` 列表：shadowsocks-android 的「订阅」、Shadowrocket |
+| `ss-plain.txt` | 明文 `ss://` 一行一个，复制粘贴就能导入 |
+| `gui-config.json` | 旧版 shadowsocks 客户端的「导入配置」 |
+| `v2ray-base64.txt` | **通用订阅**（base64 分享链接）：v2rayN、v2rayNG、Shadowrocket、NekoBox |
+| `all-links.txt` | 明文分享链接（`ss://` / `vmess://` / `vless://` / `trojan://` / `hysteria2://` / `tuic://`），方便自己挑 |
+| `singbox-outbounds.json` | sing-box 的 `outbounds` 片段（含一个 selector），粘进你自己的配置即可 |
 | `report.md` | 人类可读的测速报告（排名、延迟、速度） |
 
 `best_nodes.yml` 里有两个组：
 - `🚀 自动选择`（url-test）：Clash 自动选延迟最低的节点；
 - `🐟 手动选择(按速度排序)`：节点按实测下载速度从快到慢排列，手动挑最快的用。
+
+### 只给纯 Shadowsocks 客户端出订阅
+
+`sip008.json` / `ss-*` 只包含 Shadowsocks 节点。而入选的前几名常常全是 `http` / `socks5`
+（这类协议没有标准的分享链接格式），会把 ss 挤掉。所以脚本做了两件事：
+
+1. **候选池协议保底**（`--min-per-type`，默认 `ss=80,vmess=80,...`）：抓取时按源轮转挑选，
+   再给每种协议补足名额，保证池子里 ss 不会被大源淹没；
+2. **最终名单协议配额**（`--keep-per-type`，默认 `ss=6,vmess=5,...`）：入选名单里每种协议
+   至少留几条，从存活池里按速度补。
+
+另外 `fetch_nodes.py` 的 `SOURCES` 里补了两个 Shadowsocks 大户
+（`mahdibland/ShadowsocksAggregator` 的 `sub_merge.txt` 和 `Eternity.yml`，
+前者 4000+ 条里就有 1800 多个 ss），没有它们池子里基本捞不到 ss。
+
+想彻底不看到 http 节点，可以加 `--exclude-types http,socks5`。
 
 ## 五、如何查看结果（Clash Verge）
 

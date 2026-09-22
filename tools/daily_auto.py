@@ -42,6 +42,7 @@ import yaml
 # 复用同目录下已有脚本的解析与测速框架
 import fetch_nodes as FN
 import node_quality as NQ
+import export_formats as EF
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -217,6 +218,60 @@ def discover_new_sources(timeout):
     return valid
 
 
+# 各协议在 mihomo 里必须齐备的字段；缺一个它就会拒绝整个配置
+REQUIRED_FIELDS = {
+    "ss": ("cipher", "password"),
+    "ssr": ("cipher", "password", "protocol", "obfs"),
+    "vmess": ("uuid",),
+    "vless": ("uuid",),
+    "trojan": ("password",),
+    "hysteria2": ("password",),
+    "hysteria": ("auth-str",),
+    "tuic": ("password",),
+    "anytls": ("password",),
+    "http": (),
+    "socks5": (),
+}
+
+
+def proxy_field_error(p):
+    """返回「缺哪个字段」的说明；没问题返回 None。"""
+    t = (p.get("type") or "").lower()
+    if t not in REQUIRED_FIELDS:
+        return f"不认识的协议 {t or '?'}"
+    for f in REQUIRED_FIELDS[t]:
+        v = p.get(f)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return f"缺字段 {f}"
+    if t == "hysteria" and not (p.get("auth-str") or p.get("auth_str")):
+        return "缺字段 auth-str"
+    return None
+
+
+def _bad_proxy_index(msg):
+    """从 mihomo 的报错里取出坏节点的下标：proxy 424: '' has unset fields: password"""
+    m = re.search(r"proxy (\d+):", msg or "")
+    return int(m.group(1)) if m else None
+
+
+def _parse_floors(spec):
+    """把 "ss=80,vmess=60" 解析成 dict。"""
+    out = {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        try:
+            out[k.strip().lower()] = int(v)
+        except ValueError:
+            continue
+    return out
+
+
+DEFAULT_MIN_PER_TYPE = "ss=80,vmess=80,vless=60,trojan=40,hysteria2=40,tuic=20,anytls=20"
+
+
 def _clean_proxy_fields(p):
     """去掉值为 None / 'None' / 'null' / 空串的垃圾字段，避免污染 Clash 配置。"""
     out = {}
@@ -229,7 +284,7 @@ def _clean_proxy_fields(p):
     return out
 
 
-def fetch_all(max_nodes, timeout):
+def fetch_all(max_nodes, timeout, min_per_type=DEFAULT_MIN_PER_TYPE):
     """抓取全部来源（含动态发现的源）并解析合并，返回 (proxies, ok_urls, fail_urls)。"""
     session = requests.Session()
     session.trust_env = False  # 不走系统代理/环境变量代理，避免被坏代理卡死
@@ -267,6 +322,7 @@ def fetch_all(max_nodes, timeout):
     sources = uniq
 
     all_uris, all_proxies = [], []
+    groups = []  # 每个源一组，供轮转挑选
     ok_urls, fail_urls = [], []
     for i, src in enumerate(sources):
         url = src.split("#")[0].strip()
@@ -285,21 +341,29 @@ def fetch_all(max_nodes, timeout):
             uris, proxies = FN.parse_content(text)
         all_uris.extend(uris)
         all_proxies.extend(proxies)
+        # 每个源单独留一组，后面轮转挑选用
+        groups.append(list(proxies) + [FN.uri_to_proxy(u) for u in uris])
         print(f"[{i:02d}] {len(uris) + len(proxies):>5d}  {url}")
 
-    proxies = list(all_proxies)
-    for u in all_uris:
-        p = FN.uri_to_proxy(u)
-        if p:
-            proxies.append(p)
-
-    # 去重 + 过滤内网/假节点
+    # 去重 + 过滤内网/假节点 + 轮转挑选
+    #
+    # 注意这里不能用「拼成一个大会表再截前 max_nodes 条」的写法：
+    # 那样前面几个大源会把名额吃光，后面源里的节点（比如 ShadowsocksAggregator
+    # 里 4000 多个中的 1800 个 ss）一个都进不来。改成每个源轮流取一条，
+    # 名额就摊平了，ss / vmess 这些小众协议才有机会被测到。
     clean, seen = [], set()
-    for p in proxies:
+    dropped_field = {}
+
+    def _accept(p):
         if not isinstance(p, dict) or not p.get("server"):
-            continue
+            return None
         if FN.is_decoy(p.get("server")):
-            continue
+            return None
+        bad = proxy_field_error(p)
+        if bad:
+            dropped_field[bad.split()[1] if " " in bad else bad] = \
+                dropped_field.get(bad.split()[1] if " " in bad else bad, 0) + 1
+            return None
         key = (
             p.get("type"),
             p.get("server"),
@@ -307,9 +371,62 @@ def fetch_all(max_nodes, timeout):
             str(p.get("uuid") or p.get("password") or "")[:12],
         )
         if key in seen:
-            continue
+            return None
         seen.add(key)
-        clean.append(_clean_proxy_fields(p))
+        return _clean_proxy_fields(p)
+
+    cursors = [0] * len(groups)
+    while len(clean) < max_nodes:
+        progressed = False
+        for gi, g in enumerate(groups):
+            while cursors[gi] < len(g):
+                item = _accept(g[cursors[gi]])
+                cursors[gi] += 1
+                if item is None:
+                    continue
+                clean.append(item)
+                progressed = True
+                break
+            if len(clean) >= max_nodes:
+                break
+        if not progressed:
+            break
+    type_stat = {}
+    for p in clean:
+        type_stat[p.get("type")] = type_stat.get(p.get("type"), 0) + 1
+
+    # ===== 协议保底 =====
+    # 只按源轮转还不够：一个源内部 ss 可能排得很靠后。这里对「能转成客户端订阅」
+    # 的协议做上浮，保证池子里每种协议都够测，不然用 Shadowsocks / v2rayN 的人
+    # 永远拿到空文件。
+    floors = _parse_floors(min_per_type)
+    extra_budget = 300
+    for t, floor in floors.items():
+        need = floor - type_stat.get(t, 0)
+        if need <= 0:
+            continue
+        got = 0
+        for gi in range(len(groups)):
+            g = groups[gi]
+            while cursors[gi] < len(g) and got < need and extra_budget > 0:
+                item = _accept(g[cursors[gi]])
+                cursors[gi] += 1
+                if item is None or item.get("type") != t:
+                    continue
+                clean.append(item)
+                got += 1
+                extra_budget -= 1
+            if got >= need or extra_budget <= 0:
+                break
+        if got:
+            type_stat[t] = type_stat.get(t, 0) + got
+
+    if dropped_field:
+        print("字段不全被丢弃：" + "、".join(f"{k}×{v}" for k, v in
+                                      sorted(dropped_field.items(), key=lambda kv: -kv[1])))
+    print("候选协议分布：" + "、".join(f"{k}×{v}" for k, v in
+                                 sorted(type_stat.items(), key=lambda kv: -kv[1])))
+    print(f"进入测速的候选：{len(clean)} 个（含协议保底补入的）")
 
     # 节点名去重
     names = set()
@@ -321,7 +438,7 @@ def fetch_all(max_nodes, timeout):
             idx += 1
         names.add(n)
         p["name"] = n
-    return clean[:max_nodes], ok_urls, fail_urls
+    return clean, ok_urls, fail_urls
 
 
 def build_test_config(proxies, names, mixed_port, api_port, secret):
@@ -402,7 +519,27 @@ def speedtest(pool, args):
     results = []
     alive_count = 0
     try:
-        runner.start(cfg_path)
+        # 安全网：mihomo 只要碰到一个不合法的节点就会整个拒绝启动。
+        # 抓取阶段已经按协议校验过必填字段了，这里再兜一层 ——
+        # 从它的报错里读出坏节点的下标，剔掉重试。
+        for _ in range(8):
+            try:
+                runner.start(cfg_path)
+                break
+            except RuntimeError as e:
+                idx = _bad_proxy_index(str(e))
+                if idx is None or not (0 <= idx < len(pool)):
+                    raise
+                bad = pool.pop(idx)
+                names = [p["name"] for p in pool]
+                print(f"  mihomo 拒绝第 {idx} 个节点（{bad.get('name')} / {bad.get('type')}），剔除后重试")
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(
+                        build_test_config(pool, names, mixed, api, secret),
+                        f, allow_unicode=True, sort_keys=False,
+                    )
+        else:
+            raise RuntimeError("mihomo 连续拒绝配置，放弃本次运行")
         session = NQ.http_session(mixed)
 
         # 阶段 A：批量延迟
@@ -511,6 +648,21 @@ def main():
     ap.add_argument("--speed-max-delay", type=int, default=1500, help="参与下载测速的延迟上限 ms")
     ap.add_argument("--min-speed", type=float, default=0.2, help="合格最低下载速度 MB/s")
     ap.add_argument("--top", type=int, default=40, help="最终保留节点数量")
+    ap.add_argument(
+        "--min-per-type",
+        default=DEFAULT_MIN_PER_TYPE,
+        help="候选池里每种协议至少留几个，例如 ss=80,vmess=80",
+    )
+    ap.add_argument(
+        "--keep-per-type",
+        default="ss=6,vmess=5,vless=5,trojan=4,hysteria2=3,tuic=2,anytls=2",
+        help="最终名单里每种协议至少保留几条（从存活池按速度补），保证各客户端都有得用",
+    )
+    ap.add_argument(
+        "--exclude-types",
+        default="",
+        help="排除某些协议，逗号分隔，例如 http,socks5（这类节点转不成分享链接，会挤掉别人）",
+    )
     ap.add_argument("--timeout", type=int, default=20, help="抓取单源超时秒")
     ap.add_argument("--min-interval-hours", type=float, default=6.0, help="两次完整运行的最小间隔小时")
     ap.add_argument("--quick", action="store_true", help="只测延迟不测下载速度")
@@ -552,7 +704,7 @@ def main():
 
     # ===== 阶段 1：抓取 =====
     print(f"== 阶段 1/3：抓取节点（{datetime.now():%Y-%m-%d %H:%M:%S}）==")
-    pool, ok_urls, fail_urls = fetch_all(args.max_nodes, args.timeout)
+    pool, ok_urls, fail_urls = fetch_all(args.max_nodes, args.timeout, args.min_per_type)
     if not pool:
         print("抓取得到 0 节点，保留旧订阅，退出")
         return 1
@@ -584,6 +736,7 @@ def main():
     print("== 阶段 3/3：排序 + 输出 ==")
     if args.quick:
         results.sort(key=lambda r: r["delay"])
+        tested_all = list(results)  # 截断前的全部存活节点，导出其它格式时按协议补用
         results = results[: args.top]
         qualified_count = len(results)
     else:
@@ -594,18 +747,54 @@ def main():
         qualified_count = len(qualified)
         # 优先只保留达标的；一个都不达标时才用相对最好的一批兜底（避免空订阅）
         results = qualified if qualified else with_speed
+        tested_all = list(results)
         results = results[: args.top]
 
     by_name = {p["name"]: p for p in pool}
-    speed_map = {r["name"]: r["speed"] for r in results}
+    # 速度/延迟按名字查（用截断前的 tested_all，配额补进来的节点也要能查到）
+    stat_by_name = {r["name"]: r for r in tested_all}
+    speed_map = {r["name"]: r["speed"] for r in tested_all}
     ordered = []
     for r in results:
         if r["name"] in by_name:
             ordered.append(by_name[r["name"]])
 
+    # ===== 协议配额 =====
+    # 光按速度排，前几名常常全是 http/socks5（它们没法转成 ss:// 或 vmess:// 分享链接），
+    # 结果用 Shadowsocks / v2rayN 的人拿到的是空文件。这里给每种协议保底几条。
+    quota = _parse_floors(args.keep_per_type)
+    picked = {p.get("name") for p in ordered}
+    quota_added = {}
+    for t, need in quota.items():
+        have = sum(1 for p in ordered if (p.get("type") or "").lower() == t)
+        if have >= need:
+            continue
+        for r in tested_all:
+            if have >= need:
+                break
+            nm = r.get("name")
+            if nm in picked:
+                continue
+            p = by_name.get(nm)
+            if not p or (p.get("type") or "").lower() != t:
+                continue
+            picked.add(nm)
+            ordered.append(p)
+            have += 1
+        quota_added[t] = have
+    if any(quota_added.values()):
+        print("协议配额补入：" + "、".join(
+            f"{t}×{v}" for t, v in sorted(quota_added.items()) if v))
+
     if not ordered:
         print("排序后 0 节点，保留旧订阅，退出")
         return 1
+
+    if args.exclude_types:
+        bad = {t.strip().lower() for t in args.exclude_types.split(",") if t.strip()}
+        before = len(ordered)
+        ordered = [p for p in ordered if (p.get("type") or "").lower() not in bad]
+        print(f"按 --exclude-types 过滤掉 {before - len(ordered)} 个 {sorted(bad)} 节点")
 
     # 可选：给节点名加实测速度前缀，便于在 Clash 里一眼看出快慢
     final_proxies = []
@@ -637,6 +826,25 @@ def main():
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
     print(f"已生成 {best_path}（{len(ordered)} 个节点，按速度降序）")
 
+    # 顺手导出各种客户端认识的格式：Shadowsocks(sip008 / ss 链接)、v2rayN(通用订阅)、sing-box…
+    # 失败不影响主流程，best_nodes.yml 已经落盘了
+    try:
+        # 传两份：final_proxies 是入选的；labeled_pool 是全部测过且存活的，
+        # 让 ss / v2ray 这些格式能从更大范围里按协议挑，不被 http 类节点挤空。
+        labeled_pool = []
+        for r in tested_all:
+            p = by_name.get(r['name'])
+            if not p:
+                continue
+            q = dict(p)
+            sp = r.get('speed')
+            if not args.no_label and not args.quick and sp is not None:
+                q['name'] = f"{sp:.1f}MB/s {q['name']}"
+            labeled_pool.append(q)
+        EF.write_all(args.out, final_proxies, pool=labeled_pool)
+    except Exception as e:  # noqa: BLE001
+        print(f"导出其它客户端格式失败（不影响主流程）: {e}")
+
     # 报告
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     speed_line = (
@@ -655,9 +863,14 @@ def main():
         "| 排名 | 节点 | 延迟(ms) | 下载速度(MB/s) |",
         "|---|---|---|---|",
     ]
-    for i, r in enumerate(results[: len(ordered)], 1):
-        sp = f"{r['speed']:.2f}" if r["speed"] is not None else "-"
-        report_md.append(f"| {i} | {r['name']} | {r['delay']} | {sp} |")
+    for i, p in enumerate(final_proxies, 1):
+        orig = p["name"]
+        # 名字里可能已经带了速度前缀，查表时要去掉
+        if "MB/s " in orig and orig.split("MB/s ", 1)[1] in stat_by_name:
+            orig = orig.split("MB/s ", 1)[1]
+        st = stat_by_name.get(orig, {}) or {}
+        sp = f"{st.get('speed'):.2f}" if st.get("speed") is not None else "-"
+        report_md.append(f"| {i} | {p['name']} | {st.get('delay', '-')} | {sp} |")
     with open(os.path.join(args.out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(report_md) + "\n")
 
@@ -670,6 +883,18 @@ def main():
     with open(args.state_file, "w", encoding="utf-8") as f:
         f.write(str(time.time()))
 
+    print(f"测速池：{len(tested_all)} 个存活节点（入选前 {args.top} 个给 Clash，其余按协议补给其它客户端）")
+
+    print("输出目录里的文件：")
+    for fn, desc in (
+        ("best_nodes.yml", "Clash / mihomo / Clash Verge / FlClash"),
+        ("sip008.json", "Shadowsocks 官方 JSON 订阅"),
+        ("ss-base64.txt / ss-plain.txt", "ss:// 订阅 / 明文"),
+        ("v2ray-base64.txt / all-links.txt", "v2rayN / v2rayNG / Shadowrocket"),
+        ("singbox-outbounds.json", "sing-box outbounds 片段"),
+        ("report.md", "测速报告"),
+    ):
+        print(f"  {fn:32s} {desc}")
     print(
         f"\n完成({now})：入选 {len(ordered)} 个节点，按速度降序。"
         f"{'已同步 Clash Verge。' if synced else '未同步（可手动导入 best_nodes.yml）。'}"

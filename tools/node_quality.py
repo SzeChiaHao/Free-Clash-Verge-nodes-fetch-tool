@@ -80,16 +80,25 @@ class MihomoRunner:
 
     def start(self, cfg_path):
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # 把内核日志留下来：配置有问题时它会直接退出，只报个退出码根本没法排查
+        self.log_path = os.path.join(self.workdir, "mihomo.log")
+        try:
+            self._logf = open(self.log_path, "w", encoding="utf-8", errors="replace")
+        except OSError:
+            self._logf = None
         self.proc = subprocess.Popen(
             [self.mihomo, "-d", self.workdir, "-f", cfg_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self._logf or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if self._logf else subprocess.DEVNULL,
             creationflags=flags,
         )
         deadline = time.time() + 25
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                raise RuntimeError(f"mihomo 启动失败,退出码 {self.proc.returncode}")
+                raise RuntimeError(
+                    f"mihomo 启动失败,退出码 {self.proc.returncode}"
+                    + self._log_tail()
+                )
             try:
                 r = requests.get(
                     f"http://127.0.0.1:{self.api_port}/version",
@@ -103,7 +112,21 @@ class MihomoRunner:
             time.sleep(0.4)
         raise RuntimeError("mihomo 管理接口启动超时")
 
+    def _log_tail(self, lines=8):
+        """读内核日志末尾几行，附在异常里。"""
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+                tail = [ln.rstrip() for ln in f.readlines()[-lines:] if ln.strip()]
+            return ("\n  " + "\n  ".join(tail)) if tail else ""
+        except OSError:
+            return ""
+
     def stop(self):
+        try:
+            if getattr(self, "_logf", None):
+                self._logf.flush()
+        except Exception:  # noqa: BLE001
+            pass
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
             try:
